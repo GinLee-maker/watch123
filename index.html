@@ -20,7 +20,7 @@
     .field { display: flex; gap: 8px; align-items: center; }
     .nowrap { white-space: nowrap; }
   </style>
-  <!-- 一起看同步引擎 -->
+  <!-- 一起看同步引擎（轻量） -->
   <script src="https://togetherjs.com/togetherjs-min.js"></script>
   <!-- HLS 播放库（用于 m3u8） -->
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
@@ -42,9 +42,10 @@
     </div>
 
     <div class="tips">
+      <div>提示：</div>
       <ul>
         <li>支持 mp4/webm 直链；m3u8 会用 HLS 自动播放。</li>
-        <li>如果加载失败，多半是跨域或防盗链限制。</li>
+        <li>如果加载失败，多半是跨域或防盗链限制（见下方“直链要点”）。</li>
         <li>在同一房间里，播放/暂停、进度、倍速会自动同步。</li>
       </ul>
     </div>
@@ -52,7 +53,7 @@
     <video id="player" controls playsinline></video>
 
     <div class="controls">
-      <button id="syncNowBtn">手动同步进度</button>
+      <button id="syncNowBtn" title="将当前进度广播给房间内其他人">手动同步进度</button>
       <span id="status"></span>
     </div>
 
@@ -97,17 +98,20 @@
 
       if (isHLS(src)) {
         if (Hls.isSupported()) {
-          const hls = new Hls();
+          const hls = new Hls({ maxBufferLength: 30, maxMaxBufferLength: 60 });
           hls.loadSource(src);
           hls.attachMedia(player);
-          hls.on(Hls.Events.MANIFEST_PARSED, () => { player.play().catch(()=>{}); logStatus('HLS 加载完成'); });
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            player.play().catch(()=>{});
+            logStatus('HLS 清单解析完成');
+          });
           window._hls = hls;
         } else if (player.canPlayType('application/vnd.apple.mpegurl')) {
           player.src = src;
           await player.play().catch(()=>{});
           logStatus('HLS（原生）加载完成');
         } else {
-          throw new Error('浏览器不支持 HLS（m3u8）');
+          throw new Error('浏览器不支持 HLS（m3u8），请更换支持的浏览器');
         }
       } else {
         player.src = src;
@@ -124,31 +128,41 @@
     if (!room) { room = 'room-' + Math.random().toString(36).slice(2, 8); setQuery({ room }); }
 
     window.TogetherJSConfig = {
-      getUserName: () => 'Guest-' + Math.random().toString(36).slice(2, 6),
+      getUserName: function () { return 'Guest-' + Math.random().toString(36).slice(2, 6); },
       toolName: 'WatchTogether',
       suppressJoinConfirmation: true,
       dontShowClicks: true,
       on: {
-        ready: () => {
-          roomInfoEl.textContent = '房间：' + room + ' | 链接已可共享';
+        ready: function () {
+          roomInfoEl.textContent = '房间：' + room + ' | 链接已可共享（包含 room 参数）';
           logStatus('已加入房间');
           const src = getQuery().src;
           if (src) TogetherJS.send({ type: 'media-src', src });
         },
         receive: {
-          'media-src': msg => { if (msg.src && msg.src !== getQuery().src) loadVideo(msg.src); },
-          'media-play': () => player.play().catch(()=>{}),
-          'media-pause': () => player.pause(),
-          'media-seek': msg => { if (typeof msg.time === 'number') { const diff = Math.abs(player.currentTime - msg.time); if (diff > 0.6) player.currentTime = msg.time; } },
-          'media-rate': msg => { if (typeof msg.rate === 'number') player.playbackRate = msg.rate; }
+          'media-src': function (msg) {
+            const currentSrc = getQuery().src || '';
+            if (msg.src && msg.src !== currentSrc) loadVideo(msg.src);
+          },
+          'media-play': function () { player.play().catch(()=>{}); },
+          'media-pause': function () { player.pause(); },
+          'media-seek': function (msg) {
+            if (typeof msg.time === 'number') {
+              const diff = Math.abs(player.currentTime - msg.time);
+              if (diff > 0.6) player.currentTime = msg.time;
+            }
+          },
+          'media-rate': function (msg) {
+            if (typeof msg.rate === 'number') player.playbackRate = msg.rate;
+          }
         }
       }
     };
     TogetherJS(this);
   }
 
-  loadBtn.addEventListener('click', () => loadVideo(urlInput.value.trim()));
-  startRoomBtn.addEventListener('click', () => startRoom());
+  loadBtn.addEventListener('click', () => { const src = urlInput.value.trim(); loadVideo(src); });
+  startRoomBtn.addEventListener('click', () => { startRoom(); });
 
   player.addEventListener('play', () => { if (TogetherJS.running) TogetherJS.send({ type: 'media-play' }); });
   player.addEventListener('pause', () => { if (TogetherJS.running) TogetherJS.send({ type: 'media-pause' }); });
@@ -158,4 +172,27 @@
   player.addEventListener('timeupdate', () => {
     if (!TogetherJS.running) return;
     const now = performance.now();
-    if (now -
+    if (now - lastSent > 600) {
+      TogetherJS.send({ type: 'media-seek', time: player.currentTime });
+      lastSent = now;
+    }
+  });
+
+  syncNowBtn.addEventListener('click', () => {
+    if (TogetherJS.running) {
+      TogetherJS.send({ type: 'media-seek', time: player.currentTime });
+      logStatus('已广播当前进度');
+    } else {
+      logStatus('请先创建或加入房间');
+    }
+  });
+
+  (function initFromQuery() {
+    const q = getQuery();
+    if (q.src) { urlInput.value = q.src; loadVideo(q.src); }
+    if (q.room) { startRoom(); }
+  })();
+})();
+</script>
+</body>
+</html>
