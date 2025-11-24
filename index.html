@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>123 云盘直链一起看</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", Arial; margin: 0; background: #0f1220; color: #e8eaf6; }
+    header, footer { padding: 12px 16px; background: #1a1f3c; }
+    main { padding: 16px; max-width: 980px; margin: 0 auto; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    input[type="text"] { flex: 1 1 520px; padding: 10px; border-radius: 8px; border: 1px solid #3b3f66; background: #141830; color: #e8eaf6; }
+    button { padding: 10px 14px; border-radius: 8px; border: 1px solid #3b3f66; background: #232850; color: #e8eaf6; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .tips { font-size: 13px; color: #bac2ff; margin-top: 8px; }
+    #player { width: 100%; max-height: 70vh; background: black; }
+    .room { margin-top: 12px; font-size: 13px; color: #aab0ff; }
+    .err { color: #ff9aa2; }
+    .controls { margin: 8px 0; display: flex; gap: 8px; align-items: center; }
+    .field { display: flex; gap: 8px; align-items: center; }
+    .nowrap { white-space: nowrap; }
+  </style>
+  <!-- 一起看同步引擎（轻量） -->
+  <script src="https://togetherjs.com/togetherjs-min.js"></script>
+  <!-- HLS 播放库（用于 m3u8） -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+</head>
+<body>
+  <header>
+    <div class="row">
+      <div style="font-weight: 700;">123 云盘直链一起看</div>
+      <div style="opacity: 0.8;">填直链 → 加载 → 创建房间 → 分享链接一起看</div>
+    </div>
+  </header>
+
+  <main>
+    <div class="field">
+      <label class="nowrap">直链：</label>
+      <input id="url" type="text" placeholder="例如：https://example.com/video.mp4 或 https://example.com/playlist.m3u8" />
+      <button id="loadBtn">加载</button>
+      <button id="startRoomBtn">创建/加入房间</button>
+    </div>
+
+    <div class="tips">
+      <div>提示：</div>
+      <ul>
+        <li>支持 mp4/webm 直链；m3u8 会用 HLS 自动播放。</li>
+        <li>如果加载失败，多半是跨域或防盗链限制（见下方“直链要点”）。</li>
+        <li>在同一房间里，播放/暂停、进度、倍速会自动同步。</li>
+      </ul>
+    </div>
+
+    <video id="player" controls playsinline></video>
+
+    <div class="controls">
+      <button id="syncNowBtn" title="将当前进度广播给房间内其他人">手动同步进度</button>
+      <span id="status"></span>
+    </div>
+
+    <div class="room" id="roomInfo"></div>
+    <div class="err" id="error"></div>
+  </main>
+
+  <footer>
+    <div style="opacity: 0.8;">房间自带聊天（右下角按钮）。不同步时点“手动同步进度”。</div>
+  </footer>
+
+<script>
+(function () {
+  const urlInput = document.getElementById('url');
+  const loadBtn = document.getElementById('loadBtn');
+  const startRoomBtn = document.getElementById('startRoomBtn');
+  const player = document.getElementById('player');
+  const statusEl = document.getElementById('status');
+  const roomInfoEl = document.getElementById('roomInfo');
+  const errorEl = document.getElementById('error');
+  const syncNowBtn = document.getElementById('syncNowBtn');
+
+  function getQuery() {
+    const p = new URLSearchParams(location.search);
+    return { src: p.get('src') || '', room: p.get('room') || '' };
+  }
+  function setQuery(q) {
+    const p = new URLSearchParams(location.search);
+    if (q.src !== undefined) p.set('src', q.src);
+    if (q.room !== undefined) p.set('room', q.room);
+    history.replaceState(null, '', location.pathname + '?' + p.toString());
+  }
+  function isHLS(u) { return /\.m3u8(\?|$)/i.test(u); }
+  function logStatus(msg) { statusEl.textContent = msg || ''; }
+  function showErr(msg) { errorEl.textContent = msg || ''; }
+
+  async function loadVideo(src) {
+    showErr(''); logStatus('加载中...');
+    try {
+      if (!src) throw new Error('请填写直链');
+      if (!/^https?:\/\//i.test(src)) throw new Error('直链必须以 http/https 开头');
+
+      if (isHLS(src)) {
+        if (Hls.isSupported()) {
+          const hls = new Hls({ maxBufferLength: 30, maxMaxBufferLength: 60 });
+          hls.loadSource(src);
+          hls.attachMedia(player);
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            player.play().catch(()=>{});
+            logStatus('HLS 清单解析完成');
+          });
+          window._hls = hls;
+        } else if (player.canPlayType('application/vnd.apple.mpegurl')) {
+          player.src = src;
+          await player.play().catch(()=>{});
+          logStatus('HLS（原生）加载完成');
+        } else {
+          throw new Error('浏览器不支持 HLS（m3u8），请更换支持的浏览器');
+        }
+      } else {
+        player.src = src;
+        await player.play().catch(()=>{});
+        logStatus('视频加载完成');
+      }
+      setQuery({ src });
+    } catch (e) { showErr(e.message || String(e)); logStatus(''); }
+  }
+
+  function startRoom() {
+    const current = getQuery();
+    let room = current.room;
+    if (!room) { room = 'room-' + Math.random().toString(36).slice(2, 8); setQuery({ room }); }
+
+    window.TogetherJSConfig = {
+      getUserName: function () { return 'Guest-' + Math.random().toString(36).slice(2, 6); },
+      toolName: 'WatchTogether',
+      suppressJoinConfirmation: true,
+      dontShowClicks: true,
+      on: {
+        ready: function () {
+          roomInfoEl.textContent = '房间：' + room + ' | 链接已可共享（包含 room 参数）';
+          logStatus('已加入房间');
+          const src = getQuery().src;
+          if (src) TogetherJS.send({ type: 'media-src', src });
+        },
+        receive: {
+          'media-src': function (msg) {
+            const currentSrc = getQuery().src || '';
+            if (msg.src && msg.src !== currentSrc) loadVideo(msg.src);
+          },
+          'media-play': function () { player.play().catch(()=>{}); },
+          'media-pause': function () { player.pause(); },
+          'media-seek': function (msg) {
+            if (typeof msg.time === 'number') {
+              const diff = Math.abs(player.currentTime - msg.time);
+              if (diff > 0.6) player.currentTime = msg.time;
+            }
+          },
+          'media-rate': function (msg) {
+            if (typeof msg.rate === 'number') player.playbackRate = msg.rate;
+          }
+        }
+      }
+    };
+    TogetherJS(this);
+  }
+
+  loadBtn.addEventListener('click', () => { const src = urlInput.value.trim(); loadVideo(src); });
+  startRoomBtn.addEventListener('click', () => { startRoom(); });
+
+  player.addEventListener('play', () => { if (TogetherJS.running) TogetherJS.send({ type: 'media-play' }); });
+  player.addEventListener('pause', () => { if (TogetherJS.running) TogetherJS.send({ type: 'media-pause' }); });
+  player.addEventListener('ratechange', () => { if (TogetherJS.running) TogetherJS.send({ type: 'media-rate', rate: player.playbackRate }); });
+
+  let lastSent = 0;
+  player.addEventListener('timeupdate', () => {
+    if (!TogetherJS.running) return;
+    const now = performance.now();
+    if (now - lastSent > 600) {
+      TogetherJS.send({ type: 'media-seek', time: player.currentTime });
+      lastSent = now;
+    }
+  });
+
+  syncNowBtn.addEventListener('click', () => {
+    if (TogetherJS.running) {
+      TogetherJS.send({ type: 'media-seek', time: player.currentTime });
+      logStatus('已广播当前进度');
+    } else {
+      logStatus('请先创建或加入房间');
+    }
+  });
+
+  (function initFromQuery() {
+    const q = getQuery();
+    if (q.src) { urlInput.value = q.src; loadVideo(q.src); }
+    if (q.room) { startRoom(); }
+  })();
+})();
+</script>
+</body>
+</html>
